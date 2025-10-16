@@ -12,13 +12,143 @@ from skgstat import Variogram
 from pykrige.ok import OrdinaryKriging
 import ezdxf
 import tempfile
+import subprocess
+import threading
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QTabWidget, QPushButton, QLabel, QLineEdit, QTextEdit, 
                              QTableWidget, QTableWidgetItem, QFileDialog, QMessageBox,
                              QDoubleSpinBox, QSpinBox, QProgressBar, QGroupBox, QGridLayout,
-                             QSplitter, QHeaderView, QFrame, QSizePolicy)
+                             QSplitter, QHeaderView, QFrame, QSizePolicy, QCheckBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
+
+try:
+    from OCC.Core.IGESControl import IGESControl_Controller, IGESControl_Writer
+    from OCC.Core.Interface import Interface_Static
+    from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCC.Core.Geom import Geom_BSplineSurface
+    from OCC.Core.TColgp import TColgp_Array2OfPnt
+    from OCC.Core.TColStd import TColStd_Array1OfReal, TColStd_Array1OfInteger
+    from OCC.Core.GeomAPI import GeomAPI_PointsToBSplineSurface
+    from OCC.Core.gp import gp_Pnt
+    OCC_AVAILABLE = True
+except ImportError:
+    OCC_AVAILABLE = False
+    print("Предупреждение: Библиотека pythonocc-core не установлена. Экспорт 3D поверхностей будет недоступен.")
+
+class CrossManagerConverter:
+    """Класс для конвертации STEP/IGES в X_T с использованием CrossManager"""
+    
+    def __init__(self):
+        self.crossmanager_path = self.get_crossmanager_path()  # Инициализируем атрибут
+        
+    def get_crossmanager_path(self):
+        """Получаем путь к CrossManager в той же папке что и исполняемый файл"""
+        # Определяем путь к директории исполняемого файла
+        if getattr(sys, 'frozen', False):
+            # Если запущен как .exe (скомпилированный)
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            # Если запущен как .py скрипт
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        crossmanager_path = os.path.join(script_dir, "CrossManager.exe")
+        
+        # Дополнительная проверка: ищем в текущей рабочей директории
+        if not os.path.exists(crossmanager_path):
+            # Пробуем найти в текущей рабочей директории
+            current_dir = os.getcwd()
+            crossmanager_path = os.path.join(current_dir, "CrossManager.exe")
+        
+        if not os.path.exists(crossmanager_path):
+            print(f"CrossManager не найден по пути: {crossmanager_path}")
+            return None
+        
+        print(f"CrossManager найден: {crossmanager_path}")
+        return crossmanager_path
+    
+    def convert_to_xt(self, input_file, output_file=None):
+        """Конвертирует файл в X_T формат"""
+        if not self.crossmanager_path:  # Теперь этот атрибут существует
+            return False, "CrossManager не найден"
+        
+        if not os.path.exists(input_file):
+            return False, f"Исходный файл не существует: {input_file}"
+        
+        try:
+            # Определяем имя выходного файла
+            if output_file is None:
+                base_name = os.path.splitext(input_file)[0]
+                output_file = f"{base_name}.x_t"
+            
+            # Команда для конвертации
+            cmd = [self.crossmanager_path, input_file, output_file]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=os.path.dirname(self.crossmanager_path)
+            )
+            
+            if result.returncode == 0 and os.path.exists(output_file):
+                return True, f"Успешно сконвертирован в: {output_file}"
+            else:
+                error_msg = f"Ошибка конвертации. Код возврата: {result.returncode}"
+                if result.stderr:
+                    error_msg += f"\nДетали: {result.stderr}"
+                return False, error_msg
+                
+        except subprocess.TimeoutExpired:
+            return False, "Таймаут конвертации"
+        except Exception as e:
+            return False, f"Ошибка: {e}"
+
+class ConversionThread(QThread):
+    """Поток для конвертации файлов"""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+    
+    def __init__(self, converter, input_files, output_dir=None, convert_to_xt=False):
+        super().__init__()
+        self.converter = converter
+        self.input_files = input_files
+        self.output_dir = output_dir
+        self.convert_to_xt = convert_to_xt
+    
+    def run(self):
+        try:
+            results = []
+            for input_file in self.input_files:
+                self.progress.emit(f"Обработка: {os.path.basename(input_file)}")
+                
+                if self.convert_to_xt:
+                    if self.output_dir:
+                        base_name = os.path.splitext(os.path.basename(input_file))[0]
+                        output_file = os.path.join(self.output_dir, f"{base_name}.x_t")
+                    else:
+                        output_file = None
+                    
+                    success, message = self.converter.convert_to_xt(input_file, output_file)
+                    results.append((input_file, success, message))
+                    
+                    if success:
+                        self.progress.emit(f"✓ Успешно: {os.path.basename(input_file)}")
+                    else:
+                        self.progress.emit(f"✗ Ошибка: {os.path.basename(input_file)} - {message}")
+            
+            # Формируем итоговое сообщение
+            success_count = sum(1 for _, success, _ in results if success)
+            total_count = len(results)
+            
+            if success_count == total_count:
+                self.finished.emit(True, f"Все файлы успешно сконвертированы ({success_count}/{total_count})")
+            else:
+                self.finished.emit(False, f"Конвертировано {success_count} из {total_count} файлов")
+                
+        except Exception as e:
+            self.finished.emit(False, f"Ошибка при конвертации: {str(e)}")
 
 class KrigingThread(QThread):
     finished = pyqtSignal()
@@ -58,6 +188,7 @@ class KrigingThread(QThread):
 class KrigingApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.converter = CrossManagerConverter()
         self.init_data()
         self.init_ui()
         
@@ -75,66 +206,60 @@ class KrigingApp(QMainWindow):
         self.sigma = None
         self.padding = 0.0
         self.grid_size = 100
+        self.recent_saved_files = []
         
     def init_ui(self):
-        self.setWindowTitle("Кригинг с вариограммой Гаусса")
+        self.setWindowTitle("Кригинг с вариограммой Гаусса и конвертацией в X_T")
         self.setGeometry(50, 50, 1600, 1000)
         
-        # Центральный виджет
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Основной layout
         main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
         
-        # Создаем сплиттер для разделения на левую и правую части
         splitter = QSplitter(Qt.Horizontal)
         
-        # Левая панель - вкладки (уже)
         self.tab_widget = QTabWidget()
         self.tab_widget.setMaximumWidth(450)
         
-        # Создаем вкладки
         self.tab_data = self.create_data_tab()
         self.tab_variogram = self.create_variogram_tab()
         self.tab_edit_variogram = self.create_edit_variogram_tab()
         self.tab_kriging = self.create_kriging_tab()
         self.tab_results = self.create_results_tab()
+        self.tab_conversion = self.create_conversion_tab()
         
         self.tab_widget.addTab(self.tab_data, "Загрузка данных")
         self.tab_widget.addTab(self.tab_variogram, "Вариограмма")
         self.tab_widget.addTab(self.tab_edit_variogram, "Редактирование вариограммы")
         self.tab_widget.addTab(self.tab_kriging, "Кригинг")
         self.tab_widget.addTab(self.tab_results, "Сохранение результатов")
+        self.tab_widget.addTab(self.tab_conversion, "Конвертация в X_T")
         
-        # Правая панель - графики (больше места)
         self.plot_widget = QWidget()
         plot_layout = QVBoxLayout(self.plot_widget)
         plot_layout.setContentsMargins(5, 5, 5, 5)
         plot_layout.setSpacing(5)
         
-        # Создаем фигуру и canvas для matplotlib
         self.figure = Figure(figsize=(12, 10))
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot_layout.addWidget(self.canvas)
         
-        # Добавляем виджеты в сплиттер
         splitter.addWidget(self.tab_widget)
         splitter.addWidget(self.plot_widget)
-        splitter.setSizes([400, 1200])  # Больше места для графиков
+        splitter.setSizes([400, 1200])
         
         main_layout.addWidget(splitter)
-        
+    
     def create_data_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # Группа загрузки данных
         group_load = QGroupBox("Загрузка данных")
         group_load.setStyleSheet("QGroupBox { font-weight: bold; }")
         load_layout = QVBoxLayout(group_load)
@@ -168,7 +293,6 @@ class KrigingApp(QMainWindow):
         self.btn_variogram.clicked.connect(self.plot_empirical_variogram)
         layout.addWidget(self.btn_variogram)
         
-        # Таблица параметров вариограммы (только для просмотра)
         layout.addWidget(QLabel("Параметры вариограммы:"))
         self.variogram_table = QTableWidget()
         self.variogram_table.setRowCount(4)
@@ -177,7 +301,6 @@ class KrigingApp(QMainWindow):
         self.variogram_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.variogram_table.setMaximumHeight(180)
         
-        # Заполняем таблицу нередактируемыми значениями
         parameters = [
             ("Range (Диапазон)", ""),
             ("Sill (Силл)", ""),
@@ -202,7 +325,6 @@ class KrigingApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # Поля для редактирования параметров
         group_edit = QGroupBox("Редактирование параметров")
         group_edit.setStyleSheet("QGroupBox { font-weight: bold; }")
         edit_layout = QGridLayout(group_edit)
@@ -245,7 +367,6 @@ class KrigingApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # Параметры кригинга
         group_params = QGroupBox("Параметры кригинга")
         group_params.setStyleSheet("QGroupBox { font-weight: bold; }")
         params_layout = QGridLayout(group_params)
@@ -287,7 +408,6 @@ class KrigingApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # Информация о результатах
         group_info = QGroupBox("Информация о результатах")
         group_info.setStyleSheet("QGroupBox { font-weight: bold; }")
         info_layout = QVBoxLayout(group_info)
@@ -298,7 +418,6 @@ class KrigingApp(QMainWindow):
         info_layout.addWidget(self.results_info)
         layout.addWidget(group_info)
         
-        # Сохранение Excel
         group_excel = QGroupBox("Сохранение результатов")
         group_excel.setStyleSheet("QGroupBox { font-weight: bold; }")
         excel_layout = QVBoxLayout(group_excel)
@@ -318,7 +437,6 @@ class KrigingApp(QMainWindow):
         
         layout.addWidget(group_excel)
         
-        # Сохранение DXF
         group_dxf = QGroupBox("Сохранение изополей")
         group_dxf.setStyleSheet("QGroupBox { font-weight: bold; }")
         dxf_layout = QVBoxLayout(group_dxf)
@@ -338,10 +456,226 @@ class KrigingApp(QMainWindow):
         dxf_layout.addWidget(self.btn_save_dxf)
         
         layout.addWidget(group_dxf)
+        
+        group_3d = QGroupBox("Экспорт 3D поверхностей для GTS NX")
+        group_3d.setStyleSheet("QGroupBox { font-weight: bold; }")
+        cad_layout = QVBoxLayout(group_3d)
+        cad_layout.setSpacing(8)
+        
+        if not OCC_AVAILABLE:
+            warning_label = QLabel("ВНИМАНИЕ: Библиотека pythonocc-core не установлена.\n"
+                                 "Экспорт 3D поверхностей недоступен.\n"
+                                 "Установите: pip install pythonocc-core")
+            warning_label.setStyleSheet("color: red; font-weight: bold;")
+            cad_layout.addWidget(warning_label)
+        else:
+            cad_layout.addWidget(QLabel("Разрешение поверхности:"))
+            self.spin_surface_resolution = QSpinBox()
+            self.spin_surface_resolution.setRange(10, 200)
+            self.spin_surface_resolution.setValue(50)
+            self.spin_surface_resolution.setMinimumHeight(30)
+            cad_layout.addWidget(self.spin_surface_resolution)
+            
+            self.btn_save_iges = QPushButton("Экспорт 3D поверхности (IGES)")
+            self.btn_save_iges.setMinimumHeight(35)
+            self.btn_save_iges.clicked.connect(self.save_iges)
+            cad_layout.addWidget(self.btn_save_iges)
+            
+            self.btn_save_step = QPushButton("Экспорт 3D поверхности (STEP)")
+            self.btn_save_step.setMinimumHeight(35)
+            self.btn_save_step.clicked.connect(self.save_step)
+            cad_layout.addWidget(self.btn_save_step)
+        
+        layout.addWidget(group_3d)
         layout.addStretch()
         
         return widget
+
+    def create_conversion_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
         
+        status_text = "✓ CrossManager найден" if self.converter.crossmanager_path else "✗ CrossManager не найден"
+        status_color = "green" if self.converter.crossmanager_path else "red"
+        
+        status_label = QLabel(status_text)
+        status_label.setStyleSheet(f"color: {status_color}; font-weight: bold;")
+        layout.addWidget(status_label)
+        
+        if not self.converter.crossmanager_path:
+            warning_label = QLabel(
+                "Для конвертации необходим CrossManager.exe в папке с программой.\n"
+                "Скачайте CrossManager и поместите в ту же папку, где находится эта программа."
+            )
+            warning_label.setStyleSheet("color: orange; font-weight: bold;")
+            warning_label.setWordWrap(True)
+            layout.addWidget(warning_label)
+        
+        group_auto = QGroupBox("Автоматическая конвертация последних файлов")
+        group_auto.setStyleSheet("QGroupBox { font-weight: bold; }")
+        auto_layout = QVBoxLayout(group_auto)
+        
+        self.chk_auto_convert = QCheckBox("Автоматически конвертировать в X_T после сохранения IGES/STEP")
+        self.chk_auto_convert.setChecked(True)
+        auto_layout.addWidget(self.chk_auto_convert)
+        
+        auto_info = QLabel(
+            "При сохранении IGES/STEP файлов через вкладку 'Сохранение результатов'\n"
+            "они будут автоматически конвертированы в X_T формат."
+        )
+        auto_info.setWordWrap(True)
+        auto_info.setStyleSheet("color: gray;")
+        auto_layout.addWidget(auto_info)
+        
+        layout.addWidget(group_auto)
+        
+        group_manual = QGroupBox("Ручная конвертация файлов")
+        group_manual.setStyleSheet("QGroupBox { font-weight: bold; }")
+        manual_layout = QVBoxLayout(group_manual)
+        
+        self.btn_select_files = QPushButton("Выбрать STEP/IGES файлы для конвертации")
+        self.btn_select_files.setMinimumHeight(35)
+        self.btn_select_files.clicked.connect(self.select_files_for_conversion)
+        manual_layout.addWidget(self.btn_select_files)
+        
+        self.btn_select_folder = QPushButton("Выбрать папку для конвертации всех файлов")
+        self.btn_select_folder.setMinimumHeight(35)
+        self.btn_select_folder.clicked.connect(self.select_folder_for_conversion)
+        manual_layout.addWidget(self.btn_select_folder)
+        
+        self.conversion_progress = QProgressBar()
+        self.conversion_progress.setMinimumHeight(20)
+        manual_layout.addWidget(self.conversion_progress)
+        
+        self.conversion_log = QTextEdit()
+        self.conversion_log.setReadOnly(True)
+        self.conversion_log.setMaximumHeight(150)
+        self.conversion_log.setStyleSheet("font-family: Consolas, monospace; font-size: 9pt;")
+        manual_layout.addWidget(self.conversion_log)
+        
+        layout.addWidget(group_manual)
+        layout.addStretch()
+        
+        return widget
+
+    def select_files_for_conversion(self):
+        if not self.converter.crossmanager_path:
+            QMessageBox.warning(self, "Ошибка", "CrossManager не найден!")
+            return
+            
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, 
+            "Выберите STEP/IGES файлы для конвертации", 
+            "", 
+            "STEP/IGES файлы (*.step *.stp *.iges *.igs);;Все файлы (*.*)"
+        )
+        
+        if file_paths:
+            output_dir = QFileDialog.getExistingDirectory(
+                self, 
+                "Выберите папку для сохранения X_T файлов"
+            )
+            
+            if output_dir:
+                self.start_conversion(file_paths, output_dir)
+    
+    def select_folder_for_conversion(self):
+        if not self.converter.crossmanager_path:
+            QMessageBox.warning(self, "Ошибка", "CrossManager не найден!")
+            return
+            
+        input_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "Выберите папку с STEP/IGES файлами"
+        )
+        
+        if input_dir:
+            extensions = ['.step', '.stp', '.iges', '.igs']
+            file_paths = []
+            
+            for file in os.listdir(input_dir):
+                if any(file.lower().endswith(ext) for ext in extensions):
+                    file_paths.append(os.path.join(input_dir, file))
+            
+            if not file_paths:
+                QMessageBox.information(self, "Информация", "В выбранной папке нет STEP/IGES файлов")
+                return
+                
+            output_dir = QFileDialog.getExistingDirectory(
+                self, 
+                "Выберите папку для сохранения X_T файлов"
+            )
+            
+            if output_dir:
+                self.start_conversion(file_paths, output_dir)
+    
+    def start_conversion(self, file_paths, output_dir):
+        self.conversion_log.clear()
+        self.conversion_progress.setValue(0)
+        
+        self.conversion_thread = ConversionThread(
+            self.converter, 
+            file_paths, 
+            output_dir, 
+            convert_to_xt=True
+        )
+        
+        self.conversion_thread.progress.connect(self.update_conversion_log)
+        self.conversion_thread.finished.connect(self.on_conversion_finished)
+        self.conversion_thread.start()
+        
+        self.btn_select_files.setEnabled(False)
+        self.btn_select_folder.setEnabled(False)
+    
+    def update_conversion_log(self, message):
+        self.conversion_log.append(message)
+        self.conversion_log.verticalScrollBar().setValue(
+            self.conversion_log.verticalScrollBar().maximum()
+        )
+    
+    def on_conversion_finished(self, success, message):
+        self.btn_select_files.setEnabled(True)
+        self.btn_select_folder.setEnabled(True)
+        self.conversion_progress.setValue(100)
+        
+        self.conversion_log.append("=" * 50)
+        self.conversion_log.append(message)
+        
+        if success:
+            QMessageBox.information(self, "Успех", message)
+        else:
+            QMessageBox.warning(self, "Предупреждение", message)
+    
+    def auto_convert_to_xt(self, step_file, iges_file):
+        if not self.chk_auto_convert.isChecked() or not self.converter.crossmanager_path:
+            return
+            
+        files_to_convert = []
+        if step_file and os.path.exists(step_file):
+            files_to_convert.append(step_file)
+        if iges_file and os.path.exists(iges_file):
+            files_to_convert.append(iges_file)
+        
+        if files_to_convert:
+            output_dir = os.path.dirname(files_to_convert[0])
+            
+            self.conversion_thread = ConversionThread(
+                self.converter, 
+                files_to_convert, 
+                output_dir, 
+                convert_to_xt=True
+            )
+            
+            self.conversion_thread.progress.connect(self.update_conversion_log)
+            self.conversion_thread.finished.connect(self.on_auto_conversion_finished)
+            self.conversion_thread.start()
+    
+    def on_auto_conversion_finished(self, success, message):
+        self.conversion_log.append("[АВТО] " + message)
+
+    # Остальные методы из оригинального kriging.py
     def load_data(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Загрузите файл Excel", "", "Excel Files (*.xlsx)"
@@ -358,7 +692,6 @@ class KrigingApp(QMainWindow):
                 self.y = data['Y'].values
                 self.z = data['Z'].values
                 
-                # Вывод информации о данных
                 num_points = len(self.x)
                 distances = pdist(np.vstack((self.x, self.y)).T)
                 min_distance = np.min(distances)
@@ -394,22 +727,17 @@ class KrigingApp(QMainWindow):
             self.sill = round(sill, 3)
             self.nugget = nugget
             
-            # Обновляем поля редактирования
             self.edit_range.setValue(range_)
             self.edit_sill.setValue(sill)
             self.edit_nugget.setValue(nugget)
             
-            # Обновляем таблицу (только для просмотра)
             self.update_variogram_table()
             
-            # Строим график
             self.figure.clear()
             ax = self.figure.add_subplot(111)
             
-            # Экспериментальная вариограмма
             ax.scatter(self.V.bins, self.V.experimental, label='Экспериментальная вариограмма')
             
-            # Теоретическая вариограмма
             h = np.linspace(0, np.max(self.V.bins), 100)
             theoretical = nugget + (sill - nugget) * (1 - np.exp(-(h ** 2) / (range_ ** 2)))
             ax.plot(h, theoretical, 'r-', label='Теоретическая вариограмма (модель Гаусса)')
@@ -420,7 +748,6 @@ class KrigingApp(QMainWindow):
             ax.legend()
             ax.grid(True)
             
-            # Увеличиваем размер шметок для лучшей читаемости
             ax.tick_params(axis='both', which='major', labelsize=10)
             
             self.canvas.draw()
@@ -456,22 +783,17 @@ class KrigingApp(QMainWindow):
             QMessageBox.critical(self, "Ошибка", "Sill должен быть больше Nugget.")
             return
             
-        # Обновляем параметры
         self.range_ = new_range
         self.sill = round(new_sill, 3)
         self.nugget = new_nugget
         
-        # Обновляем таблицу просмотра
         self.update_variogram_table()
         
-        # Строим обновленный график
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         
-        # Экспериментальная вариограмма
         ax.scatter(self.V.bins, self.V.experimental, label='Экспериментальная вариограмма')
         
-        # Обновленная теоретическая вариограмма
         h = np.linspace(0, np.max(self.V.bins), 100)
         updated_theoretical = self.nugget + (self.sill - self.nugget) * (
             1 - np.exp(-(h ** 2) / (self.range_ ** 2)))
@@ -483,7 +805,6 @@ class KrigingApp(QMainWindow):
         ax.legend()
         ax.grid(True)
         
-        # Увеличиваем размер шметок для лучшей читаемости
         ax.tick_params(axis='both', which='major', labelsize=10)
         
         self.canvas.draw()
@@ -512,7 +833,6 @@ class KrigingApp(QMainWindow):
                 self.grid_size
             )
             
-            # Запускаем кригинг в отдельном потоке
             self.kriging_thread = KrigingThread()
             self.kriging_thread.x = self.x
             self.kriging_thread.y = self.y
@@ -541,10 +861,7 @@ class KrigingApp(QMainWindow):
         self.btn_kriging.setEnabled(True)
         self.progress_bar.setValue(100)
         
-        # Обновляем информацию о результатах
         self.update_results_info()
-        
-        # Показываем результаты
         self.show_kriging_results()
         
     def update_results_info(self):
@@ -562,10 +879,8 @@ class KrigingApp(QMainWindow):
             self.results_info.setText(info_text)
         
     def show_kriging_results(self):
-        # Изолинии кригинга
         self.figure.clear()
         
-        # 2D контур - больше места для графиков
         ax1 = self.figure.add_subplot(121)
         contour = ax1.contourf(self.grid_x, self.grid_y, self.z_pred, levels=20, cmap='viridis')
         ax1.scatter(self.x, self.y, c='red', s=15, label='Исходные точки')
@@ -577,33 +892,26 @@ class KrigingApp(QMainWindow):
         ax1.tick_params(axis='both', which='major', labelsize=9)
         self.figure.colorbar(contour, ax=ax1)
         
-        # 3D поверхность с правильными пропорциями
         ax2 = self.figure.add_subplot(122, projection='3d')
         X, Y = np.meshgrid(self.grid_x, self.grid_y)
         
-        # Вычисляем правильные масштабы для осей
         x_range = np.ptp(self.grid_x)
         y_range = np.ptp(self.grid_y)
         z_range = np.ptp(self.z_pred)
         
-        # Создаем поверхность с правильными пропорциями
         surf = ax2.plot_surface(X, Y, self.z_pred, cmap='viridis', alpha=0.8, 
                               linewidth=0, antialiased=True)
         
-        # Добавляем исходные точки
         ax2.scatter(self.x, self.y, self.z, c='red', s=15, label='Исходные точки')
         
-        # Настраиваем метки и заголовок
         ax2.set_xlabel('X', fontsize=11, fontweight='bold')
         ax2.set_ylabel('Y', fontsize=11, fontweight='bold')
         ax2.set_zlabel('Z', fontsize=11, fontweight='bold')
         ax2.set_title('3D поверхность после кригинга', fontsize=12, fontweight='bold')
         
-        # Устанавливаем равные масштабы для осей X и Y, а для Z настраиваем отдельно
         max_range = max(x_range, y_range)
         ax2.set_box_aspect([x_range/max_range, y_range/max_range, z_range/max_range * 0.5])
         
-        # Увеличиваем размер шрифта для 3D графика
         ax2.tick_params(axis='both', which='major', labelsize=8)
         
         self.figure.tight_layout(pad=3.0)
@@ -620,7 +928,6 @@ class KrigingApp(QMainWindow):
             target_points = self.spin_target_points.value()
             total_points = len(self.grid_x) * len(self.grid_y)
             
-            # Сохраняем исходные данные для восстановления
             original_grid_x = self.grid_x.copy()
             original_grid_y = self.grid_y.copy()
             original_z_pred = self.z_pred.copy()
@@ -632,19 +939,16 @@ class KrigingApp(QMainWindow):
             actual_points = total_points
             
             if target_points < total_points:
-                # Вычисляем шаг для уменьшения количества точек
                 step_ratio = np.sqrt(total_points / target_points)
                 step_x = max(1, int(step_ratio))
                 step_y = max(1, int(step_ratio))
                 
-                # Применяем шаг к сетке
                 grid_x_reduced = self.grid_x[::step_x]
                 grid_y_reduced = self.grid_y[::step_y]
                 z_pred_reduced = self.z_pred[::step_x, ::step_y]
                 
                 actual_points = len(grid_x_reduced) * len(grid_y_reduced)
                 
-                # Корректируем шаг, чтобы получить максимально близкое к target_points количество
                 while actual_points > target_points and step_x < len(self.grid_x) and step_y < len(self.grid_y):
                     step_x += 1
                     step_y += 1
@@ -653,7 +957,6 @@ class KrigingApp(QMainWindow):
                     z_pred_reduced = self.z_pred[::step_x, ::step_y]
                     actual_points = len(grid_x_reduced) * len(grid_y_reduced)
             
-            # Создаем DataFrame с фактическим количеством точек
             results = pd.DataFrame({
                 'X': np.repeat(grid_x_reduced, len(grid_y_reduced)),
                 'Y': np.tile(grid_y_reduced, len(grid_x_reduced)),
@@ -667,7 +970,6 @@ class KrigingApp(QMainWindow):
             if file_path:
                 results.to_excel(file_path, index=False)
                 
-                # Восстанавливаем исходные данные
                 self.grid_x = original_grid_x
                 self.grid_y = original_grid_y
                 self.z_pred = original_z_pred
@@ -697,7 +999,6 @@ class KrigingApp(QMainWindow):
             doc = ezdxf.new("R2010")
             msp = doc.modelspace()
             
-            # Добавляем границу
             boundary_points = [
                 (min(self.grid_x), min(self.grid_y), 0),
                 (max(self.grid_x), min(self.grid_y), 0),
@@ -707,12 +1008,10 @@ class KrigingApp(QMainWindow):
             ]
             msp.add_polyline3d(boundary_points)
             
-            # Создаем временную фигуру для изолиний
             fig_temp = plt.figure()
             contours = plt.contour(self.grid_x, self.grid_y, self.z_pred, levels=levels)
             plt.close(fig_temp)
             
-            # Добавляем изолинии в DXF
             for level_index, level in enumerate(contours.allsegs):
                 for line in level:
                     if len(line) > 1:
@@ -730,6 +1029,124 @@ class KrigingApp(QMainWindow):
                 
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить изополя: {str(e)}")
+
+    def save_iges(self):
+        if not OCC_AVAILABLE:
+            QMessageBox.critical(self, "Ошибка", 
+                               "Библиотека pythonocc-core не установлена.\n"
+                               "Установите: pip install pythonocc-core")
+            return
+            
+        if self.z_pred is None:
+            QMessageBox.warning(self, "Предупреждение", "Сначала выполните кригинг!")
+            return
+
+        try:
+            resolution = self.spin_surface_resolution.value()
+            
+            x_indices = np.linspace(0, len(self.grid_x)-1, resolution, dtype=int)
+            y_indices = np.linspace(0, len(self.grid_y)-1, resolution, dtype=int)
+            
+            grid_x_reduced = self.grid_x[x_indices]
+            grid_y_reduced = self.grid_y[y_indices]
+            z_pred_reduced = self.z_pred[np.ix_(x_indices, y_indices)]
+            
+            points_array = TColgp_Array2OfPnt(1, resolution, 1, resolution)
+            
+            for i in range(resolution):
+                for j in range(resolution):
+                    x = grid_x_reduced[i]
+                    y = grid_y_reduced[j]
+                    z = z_pred_reduced[i, j]
+                    points_array.SetValue(i+1, j+1, gp_Pnt(x, y, z))
+            
+            bspline_surface = GeomAPI_PointsToBSplineSurface(points_array).Surface()
+            
+            face = BRepBuilderAPI_MakeFace(bspline_surface, 1e-6).Face()
+            
+            IGESControl_Controller().Init()
+            Interface_Static.SetCVal("write.iges.unit", "M")
+            Interface_Static.SetIVal("write.iges.brep.mode", 1)
+            
+            iges_writer = IGESControl_Writer()
+            iges_writer.AddShape(face)
+            
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Экспорт 3D поверхности", "kriging_surface.iges", "IGES Files (*.iges *.igs)"
+            )
+            
+            if file_path:
+                if iges_writer.Write(file_path):
+                    success_message = f"3D поверхность успешно экспортирована в:\n{file_path}\n\nРазрешение поверхности: {resolution}x{resolution} точек"
+                    
+                    self.auto_convert_to_xt(None, file_path)
+                    
+                    QMessageBox.information(self, "Успех", success_message)
+                else:
+                    QMessageBox.critical(self, "Ошибка", "Не удалось записать IGES файл")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать 3D поверхность: {str(e)}")
+
+    def save_step(self):
+        if not OCC_AVAILABLE:
+            QMessageBox.critical(self, "Ошибка", 
+                               "Библиотека pythonocc-core не установлена.\n"
+                               "Установите: pip install pythonocc-core")
+            return
+            
+        if self.z_pred is None:
+            QMessageBox.warning(self, "Предупреждение", "Сначала выполните кригинг!")
+            return
+
+        try:
+            from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
+            from OCC.Core.Interface import Interface_Static
+            
+            resolution = self.spin_surface_resolution.value()
+            
+            x_indices = np.linspace(0, len(self.grid_x)-1, resolution, dtype=int)
+            y_indices = np.linspace(0, len(self.grid_y)-1, resolution, dtype=int)
+            
+            grid_x_reduced = self.grid_x[x_indices]
+            grid_y_reduced = self.grid_y[y_indices]
+            z_pred_reduced = self.z_pred[np.ix_(x_indices, y_indices)]
+            
+            points_array = TColgp_Array2OfPnt(1, resolution, 1, resolution)
+            
+            for i in range(resolution):
+                for j in range(resolution):
+                    x = grid_x_reduced[i]
+                    y = grid_y_reduced[j]
+                    z = z_pred_reduced[i, j]
+                    points_array.SetValue(i+1, j+1, gp_Pnt(x, y, z))
+            
+            bspline_surface = GeomAPI_PointsToBSplineSurface(points_array).Surface()
+            
+            face = BRepBuilderAPI_MakeFace(bspline_surface, 1e-6).Face()
+            
+            step_writer = STEPControl_Writer()
+            Interface_Static.SetCVal("write.step.unit", "M")
+            Interface_Static.SetCVal("write.step.product.name", "Kriging Surface")
+            
+            step_writer.Transfer(face, STEPControl_AsIs)
+            
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Экспорт 3D поверхности", "kriging_surface.step", "STEP Files (*.step *.stp)"
+            )
+            
+            if file_path:
+                if step_writer.Write(file_path):
+                    success_message = f"3D поверхность успешно экспортирована в:\n{file_path}\n\nРазрешение поверхности: {resolution}x{resolution} точек"
+                    
+                    self.auto_convert_to_xt(file_path, None)
+                    
+                    QMessageBox.information(self, "Успех", success_message)
+                else:
+                    QMessageBox.critical(self, "Ошибка", "Не удалось записать STEP файл")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать 3D поверхность: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
