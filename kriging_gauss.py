@@ -18,7 +18,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTabWidget, QPushButton, QLabel, QLineEdit, QTextEdit, 
                              QTableWidget, QTableWidgetItem, QFileDialog, QMessageBox,
                              QDoubleSpinBox, QSpinBox, QProgressBar, QGroupBox, QGridLayout,
-                             QSplitter, QHeaderView, QFrame, QSizePolicy, QCheckBox)
+                             QSplitter, QHeaderView, QFrame, QSizePolicy, QCheckBox,
+                             QDialog, QDialogButtonBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 
@@ -36,27 +37,238 @@ except ImportError:
     OCC_AVAILABLE = False
     print("Предупреждение: Библиотека pythonocc-core не установлена. Экспорт 3D поверхностей будет недоступен.")
 
+class VisualizationDialog(QDialog):
+    """Диалоговое окно для визуализации изополей и 3D модели"""
+    
+    def __init__(self, parent=None, grid_x=None, grid_y=None, z_pred=None, x=None, y=None, z=None):
+        super().__init__(parent)
+        self.grid_x = grid_x
+        self.grid_y = grid_y
+        self.z_pred = z_pred
+        self.x = x
+        self.y = y
+        self.z = z
+        
+        self.setWindowTitle("Визуализация результатов кригинга")
+        self.setGeometry(100, 100, 1400, 900)
+        
+        self.init_ui()
+        self.plot_data()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Создаем вкладки для разных типов визуализации
+        self.tab_widget = QTabWidget()
+        
+        # Вкладка с изополями
+        self.contour_tab = QWidget()
+        contour_layout = QVBoxLayout(self.contour_tab)
+        
+        # Холст для изополей
+        self.contour_figure = Figure(figsize=(10, 8))
+        self.contour_canvas = FigureCanvas(self.contour_figure)
+        contour_layout.addWidget(self.contour_canvas)
+        
+        # Кнопки для изополей
+        contour_buttons_layout = QHBoxLayout()
+        self.btn_save_contour = QPushButton("Сохранить изополя как изображение")
+        self.btn_save_contour.clicked.connect(self.save_contour_image)
+        contour_buttons_layout.addWidget(self.btn_save_contour)
+        contour_buttons_layout.addStretch()
+        contour_layout.addLayout(contour_buttons_layout)
+        
+        # Вкладка с 3D моделью
+        self.model_3d_tab = QWidget()
+        model_3d_layout = QVBoxLayout(self.model_3d_tab)
+        
+        # Холст для 3D модели
+        self.model_3d_figure = Figure(figsize=(10, 8))
+        self.model_3d_canvas = FigureCanvas(self.model_3d_figure)
+        model_3d_layout.addWidget(self.model_3d_canvas)
+        
+        # Кнопки для 3D модели
+        model_3d_buttons_layout = QHBoxLayout()
+        self.btn_save_3d = QPushButton("Сохранить 3D модель как изображение")
+        self.btn_save_3d.clicked.connect(self.save_3d_image)
+        model_3d_buttons_layout.addWidget(self.btn_save_3d)
+        model_3d_buttons_layout.addStretch()
+        model_3d_layout.addLayout(model_3d_buttons_layout)
+        
+        # Добавляем вкладки
+        self.tab_widget.addTab(self.contour_tab, "Изополя")
+        self.tab_widget.addTab(self.model_3d_tab, "3D Модель")
+        
+        layout.addWidget(self.tab_widget)
+        
+        # Кнопки закрытия
+        button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+    def plot_data(self):
+        """Построение графиков"""
+        self.plot_contour()
+        self.plot_3d_model()
+        
+    def plot_contour(self):
+        """Построение изополей"""
+        if self.z_pred is None:
+            return
+            
+        self.contour_figure.clear()
+        ax = self.contour_figure.add_subplot(111)
+        
+        # Изополи с цветовой шкалой
+        contour = ax.contourf(self.grid_x, self.grid_y, self.z_pred, levels=20, cmap='viridis')
+        ax.scatter(self.x, self.y, c='red', s=20, label='Исходные точки', alpha=0.7)
+        
+        ax.set_xlabel('X', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Y', fontsize=12, fontweight='bold')
+        ax.set_title('Изополя после кригинга', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        
+        # Добавляем цветовую шкалу
+        cbar = self.contour_figure.colorbar(contour, ax=ax)
+        cbar.set_label('Значение Z', fontsize=11, fontweight='bold')
+        
+        self.contour_canvas.draw()
+        
+    def plot_3d_model(self):
+        """Построение 3D модели"""
+        if self.z_pred is None:
+            return
+            
+        self.model_3d_figure.clear()
+        ax = self.model_3d_figure.add_subplot(111, projection='3d')
+        
+        X, Y = np.meshgrid(self.grid_x, self.grid_y)
+        
+        # Создаем поверхность
+        surf = ax.plot_surface(X, Y, self.z_pred, cmap='viridis', 
+                              alpha=0.9, linewidth=0, antialiased=True,
+                              rstride=2, cstride=2)
+        
+        # Добавляем исходные точки
+        ax.scatter(self.x, self.y, self.z, c='red', s=20, label='Исходные точки', alpha=0.7)
+        
+        ax.set_xlabel('X', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Y', fontsize=11, fontweight='bold')
+        ax.set_zlabel('Z', fontsize=11, fontweight='bold')
+        ax.set_title('3D поверхность после кригинга', fontsize=14, fontweight='bold')
+        
+        # Настраиваем вид
+        ax.view_init(elev=30, azim=45)
+        
+        # Добавляем цветовую шкалу
+        cbar = self.model_3d_figure.colorbar(surf, ax=ax, shrink=0.5, aspect=20)
+        cbar.set_label('Значение Z', fontsize=11, fontweight='bold')
+        
+        self.model_3d_canvas.draw()
+        
+    def save_contour_image(self):
+        """Сохранение изополей как изображение"""
+        if self.z_pred is None:
+            QMessageBox.warning(self, "Предупреждение", "Нет данных для сохранения!")
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить изополя как изображение", "contour_plot.png",
+            "Images (*.png *.jpg *.jpeg *.tiff *.bmp);;PDF Files (*.pdf);;SVG Files (*.svg)"
+        )
+        
+        if file_path:
+            try:
+                # Создаем отдельную фигуру для сохранения с высоким DPI
+                fig = Figure(figsize=(12, 10), dpi=300)
+                canvas = FigureCanvas(fig)
+                ax = fig.add_subplot(111)
+                
+                # Построение с высоким качеством
+                contour = ax.contourf(self.grid_x, self.grid_y, self.z_pred, levels=30, cmap='viridis')
+                ax.scatter(self.x, self.y, c='red', s=25, label='Исходные точки', alpha=0.8)
+                
+                ax.set_xlabel('X', fontsize=14, fontweight='bold')
+                ax.set_ylabel('Y', fontsize=14, fontweight='bold')
+                ax.set_title('Изополя после кригинга', fontsize=16, fontweight='bold')
+                ax.legend(fontsize=12)
+                ax.set_aspect('equal')
+                ax.grid(True, alpha=0.3)
+                
+                cbar = fig.colorbar(contour, ax=ax)
+                cbar.set_label('Значение Z', fontsize=13, fontweight='bold')
+                
+                fig.tight_layout()
+                canvas.print_figure(file_path, dpi=300, bbox_inches='tight')
+                
+                QMessageBox.information(self, "Успех", f"Изополя сохранены в:\n{file_path}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить изображение: {str(e)}")
+                
+    def save_3d_image(self):
+        """Сохранение 3D модели как изображение"""
+        if self.z_pred is None:
+            QMessageBox.warning(self, "Предупреждение", "Нет данных для сохранения!")
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить 3D модель как изображение", "3d_model.png",
+            "Images (*.png *.jpg *.jpeg *.tiff *.bmp);;PDF Files (*.pdf);;SVG Files (*.svg)"
+        )
+        
+        if file_path:
+            try:
+                # Создаем отдельную фигуру для сохранения с высоким DPI
+                fig = Figure(figsize=(12, 10), dpi=300)
+                canvas = FigureCanvas(fig)
+                ax = fig.add_subplot(111, projection='3d')
+                
+                X, Y = np.meshgrid(self.grid_x, self.grid_y)
+                
+                # Построение с высоким качеством
+                surf = ax.plot_surface(X, Y, self.z_pred, cmap='viridis', 
+                                      alpha=0.9, linewidth=0.5, antialiased=True,
+                                      rstride=1, cstride=1)
+                
+                ax.scatter(self.x, self.y, self.z, c='red', s=25, label='Исходные точки', alpha=0.8)
+                
+                ax.set_xlabel('X', fontsize=13, fontweight='bold')
+                ax.set_ylabel('Y', fontsize=13, fontweight='bold')
+                ax.set_zlabel('Z', fontsize=13, fontweight='bold')
+                ax.set_title('3D поверхность после кригинга', fontsize=16, fontweight='bold')
+                
+                ax.view_init(elev=30, azim=45)
+                
+                cbar = fig.colorbar(surf, ax=ax, shrink=0.6, aspect=30)
+                cbar.set_label('Значение Z', fontsize=13, fontweight='bold')
+                
+                fig.tight_layout()
+                canvas.print_figure(file_path, dpi=300, bbox_inches='tight')
+                
+                QMessageBox.information(self, "Успех", f"3D модель сохранена в:\n{file_path}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить изображение: {str(e)}")
+
 class CrossManagerConverter:
     """Класс для конвертации STEP/IGES в X_T с использованием CrossManager"""
     
     def __init__(self):
-        self.crossmanager_path = self.get_crossmanager_path()  # Инициализируем атрибут
+        self.crossmanager_path = self.get_crossmanager_path()
         
     def get_crossmanager_path(self):
         """Получаем путь к CrossManager в той же папке что и исполняемый файл"""
-        # Определяем путь к директории исполняемого файла
         if getattr(sys, 'frozen', False):
-            # Если запущен как .exe (скомпилированный)
             script_dir = os.path.dirname(sys.executable)
         else:
-            # Если запущен как .py скрипт
             script_dir = os.path.dirname(os.path.abspath(__file__))
         
         crossmanager_path = os.path.join(script_dir, "CrossManager.exe")
         
-        # Дополнительная проверка: ищем в текущей рабочей директории
         if not os.path.exists(crossmanager_path):
-            # Пробуем найти в текущей рабочей директории
             current_dir = os.getcwd()
             crossmanager_path = os.path.join(current_dir, "CrossManager.exe")
         
@@ -69,19 +281,17 @@ class CrossManagerConverter:
     
     def convert_to_xt(self, input_file, output_file=None):
         """Конвертирует файл в X_T формат"""
-        if not self.crossmanager_path:  # Теперь этот атрибут существует
+        if not self.crossmanager_path:
             return False, "CrossManager не найден"
         
         if not os.path.exists(input_file):
             return False, f"Исходный файл не существует: {input_file}"
         
         try:
-            # Определяем имя выходного файла
             if output_file is None:
                 base_name = os.path.splitext(input_file)[0]
                 output_file = f"{base_name}.x_t"
             
-            # Команда для конвертации
             cmd = [self.crossmanager_path, input_file, output_file]
             
             result = subprocess.run(
@@ -138,7 +348,6 @@ class ConversionThread(QThread):
                     else:
                         self.progress.emit(f"✗ Ошибка: {os.path.basename(input_file)} - {message}")
             
-            # Формируем итоговое сообщение
             success_count = sum(1 for _, success, _ in results if success)
             total_count = len(results)
             
@@ -174,7 +383,6 @@ class KrigingThread(QThread):
                 nlags=10
             )
             
-            # Эмуляция прогресса
             for i in range(101):
                 self.progress.emit(i)
                 self.msleep(20)
@@ -418,6 +626,13 @@ class KrigingApp(QMainWindow):
         info_layout.addWidget(self.results_info)
         layout.addWidget(group_info)
         
+        # Новая кнопка для визуализации
+        self.btn_visualize = QPushButton("Открыть визуализацию результатов")
+        self.btn_visualize.setMinimumHeight(40)
+        self.btn_visualize.setStyleSheet("QPushButton { font-weight: bold; background-color: #4CAF50; color: white; }")
+        self.btn_visualize.clicked.connect(self.open_visualization)
+        layout.addWidget(self.btn_visualize)
+        
         group_excel = QGroupBox("Сохранение результатов")
         group_excel.setStyleSheet("QGroupBox { font-weight: bold; }")
         excel_layout = QVBoxLayout(group_excel)
@@ -560,6 +775,15 @@ class KrigingApp(QMainWindow):
         
         return widget
 
+    def open_visualization(self):
+        """Открытие диалога визуализации"""
+        if self.z_pred is None:
+            QMessageBox.warning(self, "Предупреждение", "Сначала выполните кригинг!")
+            return
+            
+        dialog = VisualizationDialog(self, self.grid_x, self.grid_y, self.z_pred, self.x, self.y, self.z)
+        dialog.exec_()
+
     def select_files_for_conversion(self):
         if not self.converter.crossmanager_path:
             QMessageBox.warning(self, "Ошибка", "CrossManager не найден!")
@@ -675,7 +899,6 @@ class KrigingApp(QMainWindow):
     def on_auto_conversion_finished(self, success, message):
         self.conversion_log.append("[АВТО] " + message)
 
-    # Остальные методы из оригинального kriging.py
     def load_data(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Загрузите файл Excel", "", "Excel Files (*.xlsx)"
