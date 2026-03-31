@@ -26,3 +26,19 @@ Fork that replaces streamlit dependency to desktop version
 Формат X_T (Parasolid) является проприетарным и требует использования сторонней утилиты для генерации. Для конвертации IGES и STEP файлов в X_T необходим файл CrossManager.exe, который должен находиться в той же папке, что и скрипт kri.py или собранный исполняемый файл.
 
 Если CrossManager.exe отсутствует, программа сохраняет полную работоспособность всех функций, кроме конвертации в X_T. Остальные возможности (кригинг, визуализация, экспорт в Excel, DXF, IGES, STEP) остаются доступными.
+
+## Быстрый старт
+
+### Требования
+
+- Установленный Conda (Miniconda или Anaconda)
+- Для полной функциональности конвертации в X_T необходим файл CrossManager.exe в той же папке, что и программа
+
+### Установка и запуск
+
+```bash
+git clone https://github.com/ShanyaTheCarry/kriging_gauss.git
+cd kriging_gauss
+conda env create -f environment.yml
+conda activate kriging_gauss
+python kriging.py
