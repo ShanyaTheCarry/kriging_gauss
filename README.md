@@ -41,4 +41,4 @@ git clone https://github.com/ShanyaTheCarry/kriging_gauss.git
 cd kriging_gauss
 conda env create -f environment.yml
 conda activate kriging_gauss
-python kriging.py
+python kriging_gauss.py
