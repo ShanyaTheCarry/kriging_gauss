@@ -35,7 +35,7 @@ Fork that replaces streamlit dependency to desktop version
 - Для полной функциональности конвертации в X_T необходим файл CrossManager.exe в той же папке, что и программа
 
 ### Установка и запуск
-
+PS: Так же возможна установка .exe файла из release, но в связи с некоторыми зависимостями, она будет содержать не полный функционал.
 ```bash
 git clone https://github.com/ShanyaTheCarry/kriging_gauss.git
 cd kriging_gauss
