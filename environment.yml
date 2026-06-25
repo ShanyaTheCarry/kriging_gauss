@@ -12,4 +12,6 @@ dependencies:
   - ezdxf>=0.17.0
   - scikit-gstat>=1.0.0
   - pykrige>=1.5.0
-  - pythonocc-core>=7.5.0
+  - pip
+  - pip:
+    - pythonocc-core
