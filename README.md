@@ -36,9 +36,17 @@ Fork that replaces streamlit dependency to desktop version
 
 ### Установка и запуск
 PS: Так же возможна установка .exe файла из release, но в связи с некоторыми зависимостями, она будет содержать не полный функционал.
+Установка conda зависимостей
+```bash
+conda create -n kriging_gauss python=3.10 -c conda-forge -y
+conda activate kriging_gauss
+conda install numpy scipy pandas matplotlib pyqt ezdxf -c conda-forge -y
+conda install scikit-gstat pykrige -c conda-forge -y
+pip install pythonocc-core==7.7.2
+```
+### Установка kriging
 ```bash
 git clone https://github.com/ShanyaTheCarry/kriging_gauss.git
 cd kriging_gauss
-conda env create -f environment.yml
 conda activate kriging_gauss
 python kriging_gauss.py
