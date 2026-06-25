@@ -40,7 +40,7 @@ PS: Так же возможна установка .exe файла из release
 ```bash
 conda create -n kriging_gauss python=3.10 -c conda-forge -y
 conda activate kriging_gauss
-conda install numpy scipy pandas matplotlib pyqt ezdxf -c conda-forge -y
+conda install numpy scipy pandas matplotlib pyqt ezdxf openpyxl -c conda-forge -y
 conda install scikit-gstat pykrige -c conda-forge -y
 pip install pythonocc-core==7.7.2
 ```
